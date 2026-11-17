@@ -4,7 +4,7 @@ Icon %pin trên thanh menu (macOS) / khay hệ thống (Windows, Linux).
 
 - Icon hiện % pin của thiết bị YẾU NHẤT (xanh > 50%, cam 21-50%, đỏ <= 20%).
 - Bấm vào icon để xem danh sách tất cả thiết bị.
-- Tự cập nhật mỗi 60 giây, báo khi pin <= 20%.
+- Tự cập nhật mỗi 60 giây (8 giây nếu chưa thấy thiết bị nào, và đọc ngay khi máy thức dậy), báo khi pin <= 20%.
 
 Cần: battery.py nằm CÙNG THƯ MỤC với file này, và cài thư viện:
     pip3 install pystray pillow
@@ -32,7 +32,9 @@ except ImportError:
     sys.exit(1)
 
 SYSTEM = platform.system()
-REFRESH_SECONDS = 60
+REFRESH_SECONDS = 60   # chu kỳ cập nhật khi đang có thiết bị
+RETRY_SECONDS = 8      # chu kỳ khi chưa thấy thiết bị nào (để bắt nhanh lúc vừa kết nối)
+TICK = 2               # nhịp kiểm tra (giây), dùng để phát hiện máy vừa thức dậy
 LOW = 20          # báo khi pin <= mức này
 RECOVER = 25      # pin lên trên mức này thì lần sau lại báo được
 
@@ -45,39 +47,56 @@ first_done = False  # đã đọc xong lần đầu chưa
 
 
 # ---------------------------- Vẽ icon ----------------------------
+BOLD_FONTS = (
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",   # macOS
+    "/System/Library/Fonts/Helvetica.ttc",                  # macOS
+    "arialbd.ttf",                                          # Windows
+    "DejaVuSans-Bold.ttf",                                  # Linux
+    "Arial Bold.ttf",
+)
+
+
 def get_font(size):
+    for path in BOLD_FONTS:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
     try:
         return ImageFont.load_default(size=size)  # Pillow >= 10.1
     except TypeError:
-        pass
-    for name in ("Arial.ttf", "arial.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans.ttf"):
-        try:
-            return ImageFont.truetype(name, size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
+        return ImageFont.load_default()
 
 
 def make_icon(pct):
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    """Vẽ icon ở độ phân giải cao (512px) rồi thu nhỏ để chữ sắc nét."""
+    big, out = 512, 128
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     if pct is None:
-        color, text = (120, 120, 120, 255), "?"
+        color, text = (110, 110, 110, 255), "?"
     else:
         text = str(pct)
         if pct <= LOW:
-            color = (220, 53, 69, 255)
+            color = (215, 40, 50, 255)
         elif pct <= 50:
-            color = (240, 150, 20, 255)
+            color = (225, 120, 0, 255)
         else:
-            color = (40, 167, 69, 255)
-    d.rounded_rectangle((2, 8, size - 2, size - 8), radius=12, fill=color)
-    font = get_font(26 if len(text) >= 3 else 36)
-    box = d.textbbox((0, 0), text, font=font)
+            color = (30, 150, 60, 255)
+    d.rounded_rectangle((16, 16, big - 16, big - 16), radius=110, fill=color)
+
+    # chọn cỡ chữ lớn nhất mà vẫn vừa khung
+    max_w, max_h = big * 0.82, big * 0.62
+    size = 400
+    while size > 40:
+        font = get_font(size)
+        box = d.textbbox((0, 0), text, font=font)
+        if box[2] - box[0] <= max_w and box[3] - box[1] <= max_h:
+            break
+        size -= 8
     w, h = box[2] - box[0], box[3] - box[1]
-    d.text(((size - w) / 2 - box[0], (size - h) / 2 - box[1]), text, font=font, fill="white")
-    return img
+    d.text(((big - w) / 2 - box[0], (big - h) / 2 - box[1]), text, font=font, fill="white")
+    return img.resize((out, out), Image.LANCZOS)
 
 
 # ---------------------------- Thông báo ----------------------------
@@ -153,7 +172,19 @@ def loop(icon):
     icon.visible = True
     while not stop_event.is_set():
         refresh(icon)
-        stop_event.wait(REFRESH_SECONDS)
+        with lock:
+            empty = not devices
+        interval = RETRY_SECONDS if empty else REFRESH_SECONDS
+        waited = 0
+        last = time.time()
+        while waited < interval and not stop_event.is_set():
+            stop_event.wait(TICK)
+            now = time.time()
+            if now - last > TICK * 4:  # đồng hồ nhảy vọt = máy vừa thức dậy sau khi ngủ
+                stop_event.wait(4)     # chờ Bluetooth kết nối lại rồi đọc ngay
+                break
+            last = now
+            waited += TICK
 
 
 def main():
